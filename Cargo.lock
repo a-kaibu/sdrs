@@ -3043,21 +3043,21 @@ dependencies = [
 
 [[package]]
 name = "sdrs"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "sdrs-core",
 ]
 
 [[package]]
 name = "sdrs-core"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "encoding_rs",
 ]
 
 [[package]]
 name = "sdrs-gui"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "eframe",
  "egui_extras",

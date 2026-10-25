@@ -1,7 +1,8 @@
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::pe::{Bits, PEFile};
 use crate::sdrs::structs::{SdrsFlags, SdrsPatch, SdrsPatchMode};
@@ -175,7 +176,14 @@ impl SdrsProgram {
         &self.file_name
     }
 
-    pub fn extract(&mut self) -> Result<(), ExtractError> {
+    pub fn extracted_file_name(&self) -> &str {
+        self.stub
+            .as_ref()
+            .and_then(SdrsStub::configured_executable_file_name)
+            .unwrap_or(&self.file_name)
+    }
+
+    pub fn extract(&mut self) -> Result<PathBuf, ExtractError> {
         let Some(stub) = self.stub.as_ref() else {
             return Err(ExtractError::NotInitialized);
         };
@@ -184,7 +192,12 @@ impl SdrsProgram {
         };
 
         let game_dir = self.current_directory.clone();
-        let out_dir = game_dir.join("sdrs_extract");
+        let backup_dir = create_backup_dir(&game_dir).map_err(ExtractError::Io)?;
+        let staging = StagingDirectory(backup_dir.join(".staging"));
+        let out_dir = &staging.0;
+        std::fs::create_dir(out_dir).map_err(ExtractError::Io)?;
+        let exe_name = relative_file_name(self.extracted_file_name()).map_err(ExtractError::Io)?;
+        let mut outputs: Vec<PathBuf> = Vec::new();
 
         //実行ファイルのコピーを作成する
         let mut exe_bytes = self.executable_file_bytes.clone();
@@ -200,11 +213,26 @@ impl SdrsProgram {
                 }
                 SdrsPatchMode::File => {
                     //実行ファイルは別途処理する
-                    if patch.file_name == stub.executable_file_name() {
+                    if same_file_name(
+                        Path::new(&patch.file_name),
+                        Path::new(stub.executable_file_name()),
+                    ) {
                         patch_errors[i] = !decrypt_exe_region(&mut exe_bytes, patch, stub);
                     } else {
-                        patch_errors[i] = !extract_file_patch(&game_dir, &out_dir, patch, stub)
+                        let name =
+                            relative_file_name(&patch.file_name).map_err(ExtractError::Io)?;
+                        if same_file_name(&name, &exe_name)
+                            || same_file_name(&name, Path::new(&self.file_name))
+                        {
+                            return Err(ExtractError::Io(Error::other(
+                                "データファイル名が実行ファイル名と競合しています",
+                            )));
+                        }
+                        patch_errors[i] = !extract_file_patch(&game_dir, out_dir, patch, stub)
                             .map_err(ExtractError::Io)?;
+                        if !outputs.iter().any(|path| same_file_name(path, &name)) {
+                            outputs.push(name);
+                        }
                     }
                 }
                 SdrsPatchMode::Memory => {
@@ -215,22 +243,141 @@ impl SdrsProgram {
             }
         }
 
-        //実行ファイルを書き戻す
-        let exe_dest_path = out_dir.join(&self.file_name);
-        std::fs::create_dir_all(out_dir).map_err(ExtractError::Io)?;
-        std::fs::write(exe_dest_path, &exe_bytes).map_err(ExtractError::Io)?;
-
-        //失敗したパッチを確認する
+        //復号がすべて成功するまで元のファイルには触れない。
         if patch_errors.iter().any(|&failed| failed) {
-            Err(ExtractError::FailedPatches(patch_errors))
-        } else {
-            Ok(())
+            return Err(ExtractError::FailedPatches(patch_errors));
         }
+
+        //ゲームが元のEXE名を指定して自己検証する場合があるため、設定名を保持する。
+        let exe_dest_path = out_dir.join(&exe_name);
+        if let Some(parent) = exe_dest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(ExtractError::Io)?;
+        }
+        std::fs::write(exe_dest_path, &exe_bytes).map_err(ExtractError::Io)?;
+        outputs.push(exe_name);
+
+        install_outputs(&game_dir, &backup_dir, out_dir, &self.file_name, &outputs)
+            .map_err(ExtractError::Io)?;
+        Ok(backup_dir)
     }
 
     fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+//このフォルダには未配置の新規ファイルだけを格納する。バックアップは削除しない。
+struct StagingDirectory(PathBuf);
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir(self.0.parent().expect("staging parent"));
+    }
+}
+
+fn relative_file_name(name: &str) -> Result<PathBuf, Error> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || !path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        || name.contains(':')
+    {
+        return Err(Error::other(format!("無効な出力ファイル名です: {name}")));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn same_file_name(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn create_backup_dir(game_dir: &Path) -> Result<PathBuf, Error> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(Error::other)?
+        .as_nanos();
+    for suffix in 0..100 {
+        let path = game_dir.join(format!("sdrs_backup_{timestamp}_{suffix}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Error::other("バックアップフォルダを作成できません"))
+}
+
+fn install_outputs(
+    game_dir: &Path,
+    backup_dir: &Path,
+    staging_dir: &Path,
+    shell_name: &str,
+    outputs: &[PathBuf],
+) -> Result<(), Error> {
+    let mut originals = vec![PathBuf::from(shell_name)];
+    for name in outputs {
+        let dest = game_dir.join(name);
+        if dest.exists() && !originals.iter().any(|path| same_file_name(path, name)) {
+            originals.push(name.clone());
+        }
+    }
+    let mut backed_up = Vec::new();
+    let mut installed = Vec::new();
+    let result = (|| {
+        for name in &originals {
+            let source = game_dir.join(name);
+            if !source.is_file() {
+                return Err(Error::other(format!(
+                    "退避対象が通常ファイルではありません: {}",
+                    source.display()
+                )));
+            }
+            let dest = backup_dir.join(name);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(source, dest)?;
+            backed_up.push(name.clone());
+        }
+        for name in outputs {
+            let dest = game_dir.join(name);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(staging_dir.join(name), dest)?;
+            installed.push(name.clone());
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let mut failures = Vec::new();
+        for name in installed.iter().rev() {
+            if let Err(restore_err) = std::fs::rename(game_dir.join(name), staging_dir.join(name)) {
+                failures.push(restore_err.to_string());
+            }
+        }
+        for name in backed_up.iter().rev() {
+            if let Err(restore_err) = std::fs::rename(backup_dir.join(name), game_dir.join(name)) {
+                failures.push(restore_err.to_string());
+            }
+        }
+        if !failures.is_empty() {
+            return Err(Error::other(format!(
+                "{err}; 復元に失敗しました。バックアップ: {} ({})",
+                backup_dir.display(),
+                failures.join("; ")
+            )));
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn decrypt_exe_region(exe_bytes: &mut [u8], patch: &SdrsPatch, stub: &SdrsStub) -> bool {
@@ -273,7 +420,11 @@ fn extract_file_patch(
         std::fs::create_dir_all(dir)?;
     }
 
-    let mut src_file = File::open(&src_path)?;
+    //同じファイルの複数区画を復号するとき、先に復号した区画を保持する。
+    if !dest_path.exists() {
+        std::fs::copy(&src_path, &dest_path)?;
+    }
+    let mut src_file = File::open(&dest_path)?;
 
     //データ区画を読み込む
     let mut block = read_block(&mut src_file, patch.position, patch.length)?;
@@ -286,10 +437,6 @@ fn extract_file_patch(
         patch.signature2,
         false,
     );
-
-    //ファイルをコピーする
-    let src_bytes = std::fs::read(&src_path)?;
-    std::fs::write(&dest_path, &src_bytes)?;
 
     //データ区画を書き戻す
     let mut dest_file = OpenOptions::new().write(true).open(&dest_path)?;
@@ -311,4 +458,53 @@ fn read_block(file: &mut File, position: u32, length: u32) -> Result<Vec<u8>, Er
         }
     }
     Ok(block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn installation_failure_restores_originals_and_removes_partial_installation() {
+        let game_dir = std::env::temp_dir().join(format!(
+            "sdrs-install-rollback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&game_dir).unwrap();
+        fs::write(game_dir.join("shell.exe"), b"original shell").unwrap();
+        fs::write(game_dir.join("data.bin"), b"encrypted data").unwrap();
+        let backup_dir = create_backup_dir(&game_dir).unwrap();
+        let staging = StagingDirectory(backup_dir.join(".staging"));
+        fs::create_dir(&staging.0).unwrap();
+        fs::write(staging.0.join("data.bin"), b"decrypted data").unwrap();
+        //二つ目の配置に失敗する状態を作り、一つ目の配置も元へ戻ることを確認する。
+        let result = install_outputs(
+            &game_dir,
+            &backup_dir,
+            &staging.0,
+            "shell.exe",
+            &[PathBuf::from("data.bin"), PathBuf::from("game.exe")],
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(game_dir.join("shell.exe")).unwrap(),
+            b"original shell"
+        );
+        assert_eq!(
+            fs::read(game_dir.join("data.bin")).unwrap(),
+            b"encrypted data"
+        );
+        assert!(!game_dir.join("game.exe").exists());
+        assert_eq!(
+            fs::read(staging.0.join("data.bin")).unwrap(),
+            b"decrypted data"
+        );
+        drop(staging);
+        fs::remove_dir_all(game_dir).unwrap();
+    }
 }

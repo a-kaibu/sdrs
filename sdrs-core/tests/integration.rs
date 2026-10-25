@@ -6,7 +6,7 @@ use sdrs_core::sdrs::crypto::decrypt_v1;
 use sdrs_core::sdrs::hash::crc32;
 use sdrs_core::sdrs::program::SdrsProgram;
 use sdrs_core::sdrs::structs::SdrsPatchMode;
-use sdrs_core::sdrs::stub::{HEADER_VERSION_V2, HEADER_VERSION_V4};
+use sdrs_core::sdrs::stub::{HEADER_VERSION_V2, HEADER_VERSION_V4, HEADER_VERSION_V7};
 
 const DOS_HEADER_SIZE: usize = 0x40;
 const OPTIONAL_HEADER_SIZE: usize = 0xE0;
@@ -232,9 +232,9 @@ fn v2_pack_mode_full_flow() {
         assert_eq!(stub.patches()[2].mode, SdrsPatchMode::None);
     }
 
-    program.extract().expect("extract");
+    let backup_dir = program.extract().expect("extract");
 
-    let out_dir = dir.join("sdrs_extract");
+    let out_dir = dir.clone();
     let exe_out = fs::read(out_dir.join(shell_path.file_name().unwrap())).expect("read exe");
     let exe_expected = {
         let mut v = game_exe.clone();
@@ -242,6 +242,7 @@ fn v2_pack_mode_full_flow() {
         v
     };
     assert_eq!(exe_out, exe_expected, "exe memory patch restored");
+    assert_eq!(fs::read(backup_dir.join("shell.exe")).unwrap(), shell.bytes);
 
     let bin_out = fs::read(out_dir.join("data.bin")).expect("read data.bin");
     let bin_expected = {
@@ -251,8 +252,8 @@ fn v2_pack_mode_full_flow() {
     };
     assert_eq!(bin_out, bin_expected, "data.bin block decrypted");
     assert!(
-        dir.join("data.bin").is_file(),
-        "original data.bin untouched"
+        fs::read(backup_dir.join("data.bin")).unwrap() == data_bin,
+        "original data.bin backed up"
     );
 }
 
@@ -409,11 +410,11 @@ fn v4_not_pack_mode_full_flow() {
         assert_eq!(stub.patches()[255].mode, SdrsPatchMode::None);
     }
 
-    program.extract().expect("extract");
+    let backup_dir = program.extract().expect("extract");
 
-    let out_dir = dir.join("sdrs_extract");
-    //同名FileパッチはExeスライス復号のみ → 復号済みゲームExeはpacker.exeとして出力
-    let exe_out = fs::read(out_dir.join("packer.exe")).expect("read");
+    let out_dir = dir.clone();
+    //同名FileパッチはExeスライス復号のみ。設定のゲームEXE名を保持する。
+    let exe_out = fs::read(out_dir.join("game.exe")).expect("read");
     let exe_expected = {
         let mut v = game_exe.clone();
         v[EXE_POS as usize..(EXE_POS + 0x20) as usize].copy_from_slice(&exe_plain);
@@ -421,6 +422,12 @@ fn v4_not_pack_mode_full_flow() {
         v
     };
     assert_eq!(exe_out, exe_expected, "game.exe decrypted");
+    assert_eq!(
+        fs::read(backup_dir.join("packer.exe")).unwrap(),
+        shell.bytes
+    );
+    assert_eq!(fs::read(backup_dir.join("game.exe")).unwrap(), game_exe);
+    assert!(!dir.join("packer.exe").exists());
 
     let bin_out = fs::read(out_dir.join("data.bin")).expect("read");
     let bin_expected = {
@@ -461,8 +468,41 @@ fn v4_exe_name_is_shift_jis() {
     let (mut program, _) = write_and_load(&dir, "packer.exe", &shell.bytes);
     let stub = program.stub().expect("stub");
     assert_eq!(stub.executable_file_name(), "ゲーム.exe");
-    program.extract().expect("extract");
-    assert!(dir.join("sdrs_extract").join("packer.exe").is_file());
+    let backup_dir = program.extract().expect("extract");
+    assert!(dir.join("ゲーム.exe").is_file());
+    assert!(backup_dir.join("packer.exe").is_file());
+}
+
+#[test]
+fn v7_packed_executable_preserves_configured_name() {
+    let dir = temp_dir("v7-exe-name");
+    let game_exe = game_min_pe();
+    let shell = shell_file(
+        HEADER_VERSION_V7,
+        0x9540,
+        0x1_0000,
+        0x53E3_3B01,
+        0x60A,
+        |args| {
+            args[0x9440..0x944C].copy_from_slice(b"MAJOKOI.exe\0");
+        },
+        Some(&game_exe),
+    );
+    let (mut program, _) = write_and_load(&dir, "MAJOKOI_.exe", &shell.bytes);
+    fs::write(dir.join("MAJOKOI.exe"), b"previous executable").unwrap();
+    assert_eq!(program.extracted_file_name(), "MAJOKOI.exe");
+    let backup_dir = program.extract().expect("extract");
+    let out_dir = dir.clone();
+    assert_eq!(fs::read(out_dir.join("MAJOKOI.exe")).unwrap(), game_exe);
+    assert!(!out_dir.join("MAJOKOI_.exe").exists());
+    assert_eq!(
+        fs::read(backup_dir.join("MAJOKOI_.exe")).unwrap(),
+        shell.bytes
+    );
+    assert_eq!(
+        fs::read(backup_dir.join("MAJOKOI.exe")).unwrap(),
+        b"previous executable"
+    );
 }
 
 #[test]
@@ -492,10 +532,10 @@ fn failed_patch_marks_error() {
     let (mut program, _) = write_and_load(&dir, "shell.exe", &shell.bytes);
     let err = program.extract().expect_err("must fail");
     assert!(err.to_string().contains("復号に失敗"), "{err}");
-    assert!(
-        dir.join("sdrs_extract").join("shell.exe").is_file(),
-        "exe still written"
-    );
+    assert_eq!(fs::read(dir.join("shell.exe")).unwrap(), shell.bytes);
+    assert_eq!(fs::read(dir.join("data.bin")).unwrap(), vec![0u8; 0x100]);
+    assert!(!dir.join("sdrs_extract").exists());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
 }
 
 #[test]
@@ -509,4 +549,67 @@ fn load_error_messages() {
     let mut program = SdrsProgram::default();
     let err = program.load(dir.join("empty.exe")).expect_err("must fail");
     assert_eq!(err.to_string(), "主プログラムは32bitのみ対応しています");
+}
+
+#[test]
+fn multiple_patches_in_one_file_are_installed_together() {
+    let dir = temp_dir("multiple-file-patches");
+    let mut original = vec![0u8; 0x100];
+    let mut expected = original.clone();
+    for position in [0x10usize, 0x60] {
+        let mut plain = vec![0x5A; 0x20];
+        plain[..4].copy_from_slice(&1u32.to_le_bytes());
+        original[position..position + 0x20].copy_from_slice(&encrypt_region(
+            plain.clone(),
+            position as u32,
+            1,
+            2,
+        ));
+        expected[position..position + 0x20].copy_from_slice(&plain);
+    }
+    fs::write(dir.join("data.bin"), &original).unwrap();
+    let shell = shell_file(
+        HEADER_VERSION_V2,
+        0x1180,
+        0x2000,
+        7,
+        0,
+        |args| {
+            for (i, position) in [0x10u32, 0x60].iter().enumerate() {
+                let p = 0x40 + i * 0x114;
+                args[p..p + 8].copy_from_slice(b"data.bin");
+                args[p + 0x100..p + 0x104].copy_from_slice(&position.to_le_bytes());
+                args[p + 0x104..p + 0x108].copy_from_slice(&1u32.to_le_bytes());
+                args[p + 0x108..p + 0x10C].copy_from_slice(&0x20u32.to_le_bytes());
+                args[p + 0x10C..p + 0x110].copy_from_slice(&2u32.to_le_bytes());
+            }
+        },
+        Some(&game_min_pe()),
+    );
+    let (mut program, _) = write_and_load(&dir, "shell.exe", &shell.bytes);
+    let backup = program.extract().unwrap();
+    assert_eq!(fs::read(dir.join("data.bin")).unwrap(), expected);
+    assert_eq!(fs::read(backup.join("data.bin")).unwrap(), original);
+    assert_eq!(fs::read(backup.join("shell.exe")).unwrap(), shell.bytes);
+}
+
+#[test]
+fn backup_failure_restores_files_already_moved() {
+    let dir = temp_dir("backup-rollback");
+    let shell = shell_file(
+        HEADER_VERSION_V7,
+        0x9540,
+        0x1_0000,
+        7,
+        8,
+        |args| args[0x9440..0x9449].copy_from_slice(b"game.exe\0"),
+        Some(&game_min_pe()),
+    );
+    let (mut program, _) = write_and_load(&dir, "shell.exe", &shell.bytes);
+    fs::create_dir(dir.join("game.exe")).unwrap();
+    fs::write(dir.join("game.exe/keep.txt"), b"keep").unwrap();
+    assert!(program.extract().is_err());
+    assert_eq!(fs::read(dir.join("shell.exe")).unwrap(), shell.bytes);
+    assert_eq!(fs::read(dir.join("game.exe/keep.txt")).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
 }

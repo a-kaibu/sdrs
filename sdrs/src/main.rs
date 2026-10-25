@@ -21,6 +21,7 @@ fn print_info(program: &SdrsProgram) {
 
     println!();
     println!("主プログラム情報:");
+    println!("  抽出ファイル名: {}", program.extracted_file_name());
     println!("  バージョン: {}", program.executable_version());
     println!("  サイズ: 0x{:08X}", program.executable_size());
 
@@ -83,8 +84,16 @@ fn main() -> ExitCode {
 
     println!();
     match program.extract() {
-        Ok(()) => {
+        Ok(backup_dir) => {
             println!("抽出に成功しました");
+            println!(
+                "配置先: {}",
+                path.parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(program.extracted_file_name())
+                    .display()
+            );
+            println!("元ファイルの退避先: {}", backup_dir.display());
             ExitCode::SUCCESS
         }
         Err(err) => {

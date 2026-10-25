@@ -147,14 +147,19 @@ impl SdrsStub {
 
     #[must_use]
     pub fn executable_file_name(&self) -> &str {
+        self.configured_executable_file_name().unwrap_or("main.bin")
+    }
+
+    #[must_use]
+    pub fn configured_executable_file_name(&self) -> Option<&str> {
         let mode = self.config.mode;
         if (mode.contains(SdrsFlags::USE_EXECUTABLE_FILE_NAME_ARGUMENT)
             || mode.contains(SdrsFlags::EXECUTABLE_FILE_NOT_PACK))
             && !self.executable_file_name.is_empty()
         {
-            &self.executable_file_name
+            Some(&self.executable_file_name)
         } else {
-            "main.bin"
+            None
         }
     }
 

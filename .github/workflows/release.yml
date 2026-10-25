@@ -28,8 +28,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: windows-2022
             target: x86_64-pc-windows-msvc
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -44,9 +42,17 @@ jobs:
           toolchain: 1.95.0
           targets: ${{ matrix.target }}
           components: rustfmt
+      - name: Test Git tag versioning
+        run: python -m unittest discover -s .github/scripts -p "test_*.py"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
+      - name: Set version from Git tag
+        run: |
+          python .github/scripts/set_release_version.py
+          python .github/scripts/package.py --check-version
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
       - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
         run: |

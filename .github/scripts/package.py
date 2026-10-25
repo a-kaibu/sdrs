@@ -1,5 +1,6 @@
 """Package the native CLI and GUI binaries built by the release workflow."""
 
+import argparse
 import io
 import json
 import os
@@ -10,7 +11,9 @@ import zipfile
 
 
 def main():
-    target = os.environ["TARGET"]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-version", action="store_true")
+    args = parser.parse_args()
     metadata = json.loads(
         subprocess.check_output(
             ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
@@ -24,7 +27,14 @@ def main():
     tag = os.environ.get("RELEASE_TAG", "")
     if tag and tag != f"v{version}":
         raise SystemExit(f"Tag {tag} does not match Cargo version v{version}")
+    if args.check_version:
+        if tag:
+            print(f"Workspace version v{version} matches release tag")
+        else:
+            print(f"Workspace version v{version}")
+        return
 
+    target = os.environ["TARGET"]
     windows = "windows" in target
     suffix = ".exe" if windows else ""
     binaries = [

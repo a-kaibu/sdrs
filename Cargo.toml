@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["sdrs-core", "sdrs", "sdrs-gui"]
 
+[workspace.package]
+version = "0.0.0-dev"
+
 [profile.release]
 strip = true
 lto = true

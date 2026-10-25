@@ -102,7 +102,16 @@ impl SdrsApp {
 
     fn extract(&mut self) {
         match self.program.extract() {
-            Ok(()) => self.popup = Some((Popup::Info, "抽出に成功しました".into())),
+            Ok(backup_dir) => {
+                self.popup = Some((
+                    Popup::Info,
+                    format!(
+                        "ゲームフォルダに {} を配置しました\n元ファイルの退避先: {}",
+                        self.program.extracted_file_name(),
+                        backup_dir.display()
+                    ),
+                ));
+            }
             Err(err) => self.popup = Some((Popup::Error, err.to_string())),
         }
     }
@@ -281,7 +290,7 @@ impl eframe::App for SdrsApp {
                 ui.add_space(4.0);
                 ui.style_mut().spacing.button_padding = egui::vec2(24.0, 10.0);
                 if ui
-                    .add_enabled(self.info.is_some(), egui::Button::new("抽出"))
+                    .add_enabled(self.info.is_some(), egui::Button::new("抽出・置換"))
                     .clicked()
                 {
                     self.extract();
