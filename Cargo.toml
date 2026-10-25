@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sdrs-core", "sdrs"]
+members = ["sdrs-core", "sdrs", "sdrs-gui"]
 
 [profile.release]
 strip = true
