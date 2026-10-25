@@ -107,7 +107,7 @@ impl SdrsProgram {
         //主プログラムを読み込む
         let shell_bytes = std::fs::read(path).map_err(LoadError::Io)?;
 
-        //ソフトバッテリーのシェルは現状32bitのみ
+        //シェルは現状32bitのみ
         let shell_pe = PEFile::load(Bits::X32, &shell_bytes).ok_or(LoadError::Not32Bit)?;
 
         //設定データはオーバーレイ(附加データ区画)に格納されている

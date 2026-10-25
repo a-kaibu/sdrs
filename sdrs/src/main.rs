@@ -3,9 +3,7 @@ use std::process::ExitCode;
 
 use sdrs_core::sdrs::program::SdrsProgram;
 
-const USAGE: &str = "sdrs - DMM/Fanza ソフトバッテリーDRM抽出ツール
-
-使い方: sdrs [オプション] <主プログラム.exe>
+const USAGE: &str = "使い方: sdrs [オプション] <主プログラム.exe>
 
 オプション:
   -i, --info  情報のみ表示して抽出は行わない
